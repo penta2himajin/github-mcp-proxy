@@ -1,0 +1,27 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "github-mcp-proxy",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-03-10",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	/**
+	 * Secrets (set via `npx wrangler secret put <NAME>`):
+	 *   GITHUB_CLIENT_ID
+	 *   GITHUB_CLIENT_SECRET
+	 *   COOKIE_ENCRYPTION_KEY
+	 */
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "<Add-KV-ID>"
+		}
+	],
+	"observability": {
+		"enabled": true
+	},
+	"dev": {
+		"port": 8788
+	}
+}
