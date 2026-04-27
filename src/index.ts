@@ -12,8 +12,9 @@ interface JsonRpcRequest {
 }
 
 // The apiHandler receives (request, env, ctx) where ctx.props
-// is set by OAuthProvider after token validation.
-const proxyHandler: ExportedHandler<Env> = {
+// is set by OAuthProvider after token validation. OAuthProvider expects a
+// handler whose `fetch` is required (not optional), so narrow the type.
+const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, "fetch"> = {
 	async fetch(request, _env, ctx) {
 		const props = (ctx as any).props as {
 			login: string;
