@@ -1,6 +1,6 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { GitHubHandler } from "./github-handler";
-import { handlePatchFile, PATCH_FILE_TOOL } from "./patch-file";
+import { handlePatchFiles, PATCH_FILES_TOOL } from "./patch-files";
 
 const UPSTREAM_MCP_URL = "https://api.githubcopilot.com/mcp/";
 
@@ -33,7 +33,7 @@ const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, 
 		const upstreamUrl = new URL(subPath, UPSTREAM_MCP_URL);
 
 		// Intercept JSON-RPC on POSTs to the MCP root so we can advertise and
-		// service our own `patch_file` tool. Everything else streams through.
+		// service our own `patch_files` tool. Everything else streams through.
 		if (
 			request.method === "POST" &&
 			subPath === "" &&
@@ -43,8 +43,8 @@ const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, 
 			const parsed = tryParseJson(bodyText);
 			const single = !Array.isArray(parsed) && isJsonRpcRequest(parsed) ? parsed : null;
 
-			if (single?.method === "tools/call" && single.params?.name === "patch_file") {
-				const result = await handlePatchFile(
+			if (single?.method === "tools/call" && single.params?.name === "patch_files") {
+				const result = await handlePatchFiles(
 					single.params?.arguments ?? {},
 					props.accessToken,
 				);
@@ -59,7 +59,7 @@ const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, 
 			);
 
 			if (single?.method === "tools/list") {
-				return injectPatchFileTool(upstreamResponse);
+				return injectPatchFilesTool(upstreamResponse);
 			}
 			return upstreamResponse;
 		}
@@ -125,14 +125,14 @@ function jsonRpcResponse(id: string | number | null, result: unknown): Response 
 	);
 }
 
-async function injectPatchFileTool(upstreamResponse: Response): Promise<Response> {
+async function injectPatchFilesTool(upstreamResponse: Response): Promise<Response> {
 	const ct = upstreamResponse.headers.get("content-type") ?? "";
 
 	if (ct.includes("application/json")) {
 		const text = await upstreamResponse.text();
 		const obj = tryParseJson(text) as any;
 		if (obj?.result?.tools && Array.isArray(obj.result.tools)) {
-			obj.result.tools.push(PATCH_FILE_TOOL);
+			obj.result.tools.push(PATCH_FILES_TOOL);
 			return rewriteBody(upstreamResponse, JSON.stringify(obj));
 		}
 		return rewriteBody(upstreamResponse, text);
@@ -143,7 +143,7 @@ async function injectPatchFileTool(upstreamResponse: Response): Promise<Response
 		const rewritten = text.replace(/^data:[ \t]?(.+)$/gm, (line, payload) => {
 			const obj = tryParseJson(payload) as any;
 			if (obj?.result?.tools && Array.isArray(obj.result.tools)) {
-				obj.result.tools.push(PATCH_FILE_TOOL);
+				obj.result.tools.push(PATCH_FILES_TOOL);
 				return `data: ${JSON.stringify(obj)}`;
 			}
 			return line;
