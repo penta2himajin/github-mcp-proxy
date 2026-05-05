@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Run JS actions on Node.js 24 ahead of GitHub's 2026-06-02 default switch.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  test:
+    name: type-check & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Layer 1: npm registry tarball cache (~/.npm), keyed on the lockfile.
+      # actions/setup-node manages restore + save automatically.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Layer 2: node_modules itself, keyed on (os, node-version, lockfile).
+      # An exact hit lets us skip `npm ci` entirely; restore-keys give us a
+      # warm starting point on lockfile changes so npm ci does less work.
+      - name: Cache node_modules
+        id: node-modules-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node_modules-${{ runner.os }}-node22-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            node_modules-${{ runner.os }}-node22-
+
+      - name: Install dependencies
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+        run: npm ci --prefer-offline --no-audit --fund=false
+
+      # Layer 3: vitest's transform/eval cache. Keyed on sources + config so
+      # a clean hit is reused, with restore-keys so partial reuse is still
+      # possible across source changes.
+      - name: Cache vitest
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.vite/vitest
+          key: vitest-${{ runner.os }}-node22-${{ hashFiles('src/**/*.ts', 'vitest.config.ts', 'package-lock.json') }}
+          restore-keys: |
+            vitest-${{ runner.os }}-node22-
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Test
+        run: npm test
