@@ -2,7 +2,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { GitHubHandler } from "./github-handler";
 import { handlePatchFiles, PATCH_FILES_TOOL } from "./patch-files";
 
-const UPSTREAM_MCP_URL = "https://api.githubcopilot.com/mcp/";
+const UPSTREAM_MCP_URL = "https://api.githubcopilot.com/mcp/x/all/";
 
 interface JsonRpcRequest {
 	jsonrpc?: string;
