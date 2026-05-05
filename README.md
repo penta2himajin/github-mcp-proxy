@@ -8,7 +8,7 @@ Use this as a custom MCP connector on claude.ai to get full access to GitHub's M
 
 1. Client connects to your Worker's `/mcp` endpoint
 2. Worker triggers GitHub OAuth flow (with `read:user,repo` scopes)
-3. After authentication, the Worker transparently proxies all MCP requests to `api.githubcopilot.com/mcp/`, injecting the user's GitHub token as `Authorization: Bearer`
+3. After authentication, the Worker transparently proxies all MCP requests to `api.githubcopilot.com/mcp/x/all/` (all toolsets enabled, including `actions`), injecting the user's GitHub token as `Authorization: Bearer`
 
 ## Setup
 
