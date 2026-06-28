@@ -44,6 +44,22 @@ npm run deploy
 3. Claude will redirect you to GitHub for authentication
 4. Once authorized, all GitHub MCP tools become available in your conversations
 
+## Custom tools
+
+On top of the upstream GitHub MCP toolset, the proxy advertises and services a
+few tools of its own:
+
+- **`patch_files`** — apply targeted text edits to existing files on a branch in
+  a single atomic commit.
+- **`download_repository_archive`** — get a temporary, signed download URL for a
+  repository archive. The request is authenticated with the user's token, so it
+  works for **private** repositories. The proxy follows the GitHub archive
+  endpoint's redirect and returns the resulting `codeload.github.com` URL, which
+  is short-lived and downloadable without further authentication (the GitHub
+  token is never embedded in the URL). Arguments: `owner`, `repo`, optional
+  `ref` (branch/tag/SHA, defaults to the repository's default branch), and
+  optional `format` (`zip` or `tar.gz`, defaults to `zip`).
+
 ## Local development
 
 ```bash
