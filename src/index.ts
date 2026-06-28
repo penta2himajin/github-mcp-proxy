@@ -1,6 +1,11 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { GitHubHandler } from "./github-handler";
 import { handlePatchFiles, PATCH_FILES_TOOL } from "./patch-files";
+import { DOWNLOAD_ARCHIVE_TOOL, handleDownloadArchive } from "./download-archive";
+
+// Custom tools this proxy advertises and services itself, on top of the
+// upstream GitHub MCP toolset.
+const CUSTOM_TOOLS = [PATCH_FILES_TOOL, DOWNLOAD_ARCHIVE_TOOL];
 
 const UPSTREAM_MCP_URL = "https://api.githubcopilot.com/mcp/x/all/";
 
@@ -33,7 +38,7 @@ const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, 
 		const upstreamUrl = new URL(subPath, UPSTREAM_MCP_URL);
 
 		// Intercept JSON-RPC on POSTs to the MCP root so we can advertise and
-		// service our own `patch_files` tool. Everything else streams through.
+		// service our own custom tools. Everything else streams through.
 		if (
 			request.method === "POST" &&
 			subPath === "" &&
@@ -43,12 +48,17 @@ const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, 
 			const parsed = tryParseJson(bodyText);
 			const single = !Array.isArray(parsed) && isJsonRpcRequest(parsed) ? parsed : null;
 
-			if (single?.method === "tools/call" && single.params?.name === "patch_files") {
-				const result = await handlePatchFiles(
-					single.params?.arguments ?? {},
-					props.accessToken,
-				);
-				return jsonRpcResponse(single.id ?? null, result);
+			if (single?.method === "tools/call") {
+				const toolName = single.params?.name;
+				const toolArgs = single.params?.arguments ?? {};
+				if (toolName === "patch_files") {
+					const result = await handlePatchFiles(toolArgs, props.accessToken);
+					return jsonRpcResponse(single.id ?? null, result);
+				}
+				if (toolName === "download_repository_archive") {
+					const result = await handleDownloadArchive(toolArgs, props.accessToken);
+					return jsonRpcResponse(single.id ?? null, result);
+				}
 			}
 
 			const upstreamResponse = await forwardRequest(
@@ -59,7 +69,7 @@ const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, 
 			);
 
 			if (single?.method === "tools/list") {
-				return injectPatchFilesTool(upstreamResponse);
+				return injectCustomTools(upstreamResponse);
 			}
 			return upstreamResponse;
 		}
@@ -125,14 +135,14 @@ function jsonRpcResponse(id: string | number | null, result: unknown): Response 
 	);
 }
 
-async function injectPatchFilesTool(upstreamResponse: Response): Promise<Response> {
+async function injectCustomTools(upstreamResponse: Response): Promise<Response> {
 	const ct = upstreamResponse.headers.get("content-type") ?? "";
 
 	if (ct.includes("application/json")) {
 		const text = await upstreamResponse.text();
 		const obj = tryParseJson(text) as any;
 		if (obj?.result?.tools && Array.isArray(obj.result.tools)) {
-			obj.result.tools.push(PATCH_FILES_TOOL);
+			obj.result.tools.push(...CUSTOM_TOOLS);
 			return rewriteBody(upstreamResponse, JSON.stringify(obj));
 		}
 		return rewriteBody(upstreamResponse, text);
@@ -143,7 +153,7 @@ async function injectPatchFilesTool(upstreamResponse: Response): Promise<Respons
 		const rewritten = text.replace(/^data:[ \t]?(.+)$/gm, (line, payload) => {
 			const obj = tryParseJson(payload) as any;
 			if (obj?.result?.tools && Array.isArray(obj.result.tools)) {
-				obj.result.tools.push(PATCH_FILES_TOOL);
+				obj.result.tools.push(...CUSTOM_TOOLS);
 				return `data: ${JSON.stringify(obj)}`;
 			}
 			return line;
