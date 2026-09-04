@@ -8,6 +8,9 @@ declare namespace Cloudflare {
 	}
 	interface Env {
 		OAUTH_KV: KVNamespace;
+		ARCHIVE_UPLOADS: R2Bucket;
+		R2_BUCKET_NAME: string;
+		ARCHIVE_UPLOAD_TTL_SECONDS: string;
 		AI: Ai;
 		MCP_OBJECT: DurableObjectNamespace<import("./src/index").MyMCP>;
 	}

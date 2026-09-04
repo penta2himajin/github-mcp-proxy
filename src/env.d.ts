@@ -6,5 +6,10 @@ declare namespace Cloudflare {
 		GITHUB_CLIENT_ID: string;
 		GITHUB_CLIENT_SECRET: string;
 		COOKIE_ENCRYPTION_KEY: string;
+		R2_ACCOUNT_ID: string;
+		R2_ACCESS_KEY_ID: string;
+		R2_SECRET_ACCESS_KEY: string;
+		R2_BUCKET_NAME: string;
+		ARCHIVE_UPLOAD_TTL_SECONDS?: string;
 	}
 }

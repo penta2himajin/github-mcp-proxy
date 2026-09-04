@@ -2,10 +2,26 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { GitHubHandler } from "./github-handler";
 import { handlePatchFiles, PATCH_FILES_TOOL } from "./patch-files";
 import { DOWNLOAD_ARCHIVE_TOOL, handleDownloadArchive } from "./download-archive";
+import {
+	CREATE_ARCHIVE_UPLOAD_TOOL,
+	GET_ARCHIVE_UPLOAD_STATUS_TOOL,
+	handleCreateArchiveUpload,
+	handleGetArchiveUploadStatus,
+	type ArchiveUploadEnv,
+} from "./archive-upload";
+import {
+	handleArchiveUploadQueue,
+	type R2EventNotification,
+} from "./archive-upload-process";
 
 // Custom tools this proxy advertises and services itself, on top of the
 // upstream GitHub MCP toolset.
-const CUSTOM_TOOLS = [PATCH_FILES_TOOL, DOWNLOAD_ARCHIVE_TOOL];
+const CUSTOM_TOOLS = [
+	PATCH_FILES_TOOL,
+	DOWNLOAD_ARCHIVE_TOOL,
+	CREATE_ARCHIVE_UPLOAD_TOOL,
+	GET_ARCHIVE_UPLOAD_STATUS_TOOL,
+];
 
 const UPSTREAM_MCP_URL = "https://api.githubcopilot.com/mcp/x/all/";
 
@@ -20,7 +36,7 @@ interface JsonRpcRequest {
 // is set by OAuthProvider after token validation. OAuthProvider expects a
 // handler whose `fetch` is required (not optional), so narrow the type.
 const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, "fetch"> = {
-	async fetch(request, _env, ctx) {
+	async fetch(request, env, ctx) {
 		const props = (ctx as any).props as {
 			login: string;
 			name: string;
@@ -57,6 +73,23 @@ const proxyHandler: ExportedHandler<Env> & Pick<Required<ExportedHandler<Env>>, 
 				}
 				if (toolName === "download_repository_archive") {
 					const result = await handleDownloadArchive(toolArgs, props.accessToken);
+					return jsonRpcResponse(single.id ?? null, result);
+				}
+				if (toolName === "create_archive_upload") {
+					const result = await handleCreateArchiveUpload(
+						toolArgs,
+						props.accessToken,
+						props.login || "unknown",
+						env as unknown as ArchiveUploadEnv,
+						url.origin,
+					);
+					return jsonRpcResponse(single.id ?? null, result);
+				}
+				if (toolName === "get_archive_upload_status") {
+					const result = await handleGetArchiveUploadStatus(
+						toolArgs,
+						env as unknown as ArchiveUploadEnv,
+					);
 					return jsonRpcResponse(single.id ?? null, result);
 				}
 			}
@@ -111,7 +144,7 @@ function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
 	);
 }
 
-async function forwardRequest(
+function forwardRequest(
 	request: Request,
 	upstreamUrl: URL,
 	body: string,
@@ -175,7 +208,7 @@ function rewriteBody(original: Response, body: string): Response {
 	});
 }
 
-export default new OAuthProvider({
+const oauthProvider = new OAuthProvider({
 	apiHandler: proxyHandler,
 	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
@@ -183,3 +216,15 @@ export default new OAuthProvider({
 	defaultHandler: GitHubHandler as any,
 	tokenEndpoint: "/token",
 });
+
+export default {
+	fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
+		oauthProvider.fetch(request, env, ctx),
+	async queue(
+		batch: MessageBatch<R2EventNotification>,
+		env: Env,
+		_ctx: ExecutionContext,
+	): Promise<void> {
+		await handleArchiveUploadQueue(batch, env as unknown as ArchiveUploadEnv);
+	},
+};
