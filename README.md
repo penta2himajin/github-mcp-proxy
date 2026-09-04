@@ -34,14 +34,15 @@ npx wrangler secret put GITHUB_CLIENT_SECRET
 npx wrangler secret put COOKIE_ENCRYPTION_KEY   # any random string
 
 # Archive upload (R2 + Queue) — reverse of download_repository_archive
-npx wrangler r2 bucket create github-mcp-proxy-archive-uploads
+# R2 may be auto-provisioned on deploy; Queues are NOT (yet), so create the
+# queue before the first deploy (or rely on `npm run deploy`, which ensures it).
 npx wrangler queues create archive-upload-events
 # Create an R2 API token (Object Read & Write) and set:
 npx wrangler secret put R2_ACCOUNT_ID
 npx wrangler secret put R2_ACCESS_KEY_ID
 npx wrangler secret put R2_SECRET_ACCESS_KEY
 
-# Deploy
+# Deploy (also runs scripts/ensure-archive-upload-queue.mjs)
 npm run deploy
 
 # Wire R2 object-create events → Queue (once, after bucket + queue exist)
@@ -49,6 +50,10 @@ npx wrangler r2 bucket notification create github-mcp-proxy-archive-uploads \
   --event-type object-create --queue archive-upload-events \
   --prefix "archive-uploads/"
 ```
+
+If you use **Workers Builds** (Git-connected deploy), set the deploy command to
+`npm run deploy` (not bare `npx wrangler deploy`) so the queue is created
+automatically when missing.
 
 ### 3. Connect from claude.ai
 
