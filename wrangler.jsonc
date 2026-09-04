@@ -11,6 +11,16 @@
 	 *   GITHUB_CLIENT_ID
 	 *   GITHUB_CLIENT_SECRET
 	 *   COOKIE_ENCRYPTION_KEY
+	 *   R2_ACCOUNT_ID
+	 *   R2_ACCESS_KEY_ID
+	 *   R2_SECRET_ACCESS_KEY
+	 *
+	 * After first deploy, wire R2 → Queue notifications once:
+	 *   npx wrangler queues create archive-upload-events
+	 *   npx wrangler r2 bucket create github-mcp-proxy-archive-uploads
+	 *   npx wrangler r2 bucket notification create github-mcp-proxy-archive-uploads \
+	 *     --event-type object-create --queue archive-upload-events \
+	 *     --prefix "archive-uploads/"
 	 */
 	"kv_namespaces": [
 		{
@@ -18,6 +28,25 @@
 			"id": "061e70e330f844ae8e643a185a92e079"
 		}
 	],
+	"r2_buckets": [
+		{
+			"binding": "ARCHIVE_UPLOADS",
+			"bucket_name": "github-mcp-proxy-archive-uploads"
+		}
+	],
+	"queues": {
+		"consumers": [
+			{
+				"queue": "archive-upload-events",
+				"max_batch_size": 5,
+				"max_retries": 5
+			}
+		]
+	},
+	"vars": {
+		"R2_BUCKET_NAME": "github-mcp-proxy-archive-uploads",
+		"ARCHIVE_UPLOAD_TTL_SECONDS": "900"
+	},
 	"observability": {
 		"enabled": true
 	},

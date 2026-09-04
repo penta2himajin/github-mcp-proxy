@@ -14,8 +14,16 @@ import {
 	validateCSRFToken,
 	validateOAuthState,
 } from "./workers-oauth-utils";
+import { handleArchiveUploadStatusHttp } from "./archive-upload";
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
+
+// Public status endpoint for archive upload sessions (upload_id is unguessable).
+// R2's presigned PUT cannot signal "accepted but not reflected"; clients poll here
+// (or via get_archive_upload_status) after uploading.
+app.get("/archive-uploads/:upload_id", async (c) => {
+	return handleArchiveUploadStatusHttp(c.req.param("upload_id"), c.env);
+});
 
 app.get("/authorize", async (c) => {
 	const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
