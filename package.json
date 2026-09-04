@@ -3,7 +3,8 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "deploy": "wrangler deploy",
+    "deploy": "node scripts/ensure-archive-upload-queue.mjs && wrangler deploy",
+		"ensure:queue": "node scripts/ensure-archive-upload-queue.mjs",
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "cf-typegen": "wrangler types",
