@@ -15,7 +15,15 @@ import {
 	uploadIdFromObjectKey,
 	type ArchiveUploadSession,
 } from "./archive-upload-session";
-import { extractZipArchive, processR2Event } from "./archive-upload-process";
+import {
+	extractZipArchive,
+	isRetryableGitHubStatus,
+	isTransientError,
+	isUtf8Text,
+	partitionFilesForTree,
+	processR2Event,
+	type ExtractedFile,
+} from "./archive-upload-process";
 
 describe("tool schemas", () => {
 	it("declares create_archive_upload fields", () => {
@@ -272,8 +280,146 @@ describe("processR2Event one-shot behavior", () => {
 		expect(updated.commit_sha).toBe("commit1");
 		expect(updated.committed_etag).toBe("etag-new");
 		expect(fetchMock).toHaveBeenCalled();
+
+		// Text-only archives should inline content in Create Tree (no per-file blobs).
+		const blobPosts = fetchMock.mock.calls.filter(([input, init]) => {
+			const url = String(input);
+			const method = ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
+			return url.endsWith("/git/blobs") && method === "POST";
+		});
+		expect(blobPosts).toHaveLength(0);
+
+		const treePost = fetchMock.mock.calls.find(([input, init]) => {
+			const url = String(input);
+			const method = ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
+			return url.endsWith("/git/trees") && method === "POST";
+		});
+		expect(treePost).toBeTruthy();
+		const treeBody = JSON.parse(String((treePost![1] as RequestInit).body)) as {
+			tree: Array<{ path: string; content?: string; sha?: string }>;
+		};
+		expect(treeBody.tree).toEqual([
+			expect.objectContaining({ path: "hello.txt", content: "hello" }),
+		]);
+		expect(treeBody.tree[0]?.sha).toBeUndefined();
+	});
+
+	it("creates blobs only for binary files, still committing text via tree content", async () => {
+		const env = mockEnv();
+		const session = baseSession({
+			status: "awaiting_upload",
+			object_key: "archive-uploads/u1/archive.zip",
+			upload_id: "u1",
+		});
+		await env.OAUTH_KV.put(sessionKvKey("u1"), JSON.stringify(session));
+
+		const zip = zipSync({
+			"proj/readme.md": new TextEncoder().encode("# hi"),
+			"proj/data.bin": new Uint8Array([0, 1, 2, 255]),
+		});
+		await env.ARCHIVE_UPLOADS.put("archive-uploads/u1/archive.zip", zip);
+
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const url = String(input);
+			const method = (init?.method ?? "GET").toUpperCase();
+			if (url.endsWith("/git/blobs") && method === "POST") {
+				return jsonRes({ sha: "blob-bin" });
+			}
+			if (url.endsWith("/git/trees") && method === "POST") {
+				return jsonRes({ sha: "tree1" });
+			}
+			if (url.includes("/git/refs/heads/") && method === "GET") {
+				return new Response("missing", { status: 404 });
+			}
+			if (url.endsWith("/git/commits") && method === "POST") {
+				return jsonRes({ sha: "commit1" });
+			}
+			if (url.endsWith("/git/refs") && method === "POST") {
+				return jsonRes({ ref: "refs/heads/main" });
+			}
+			return new Response(`unexpected ${method} ${url}`, { status: 500 });
+		});
+
+		await processR2Event(
+			{
+				action: "PutObject",
+				object: {
+					key: "archive-uploads/u1/archive.zip",
+					eTag: "etag-bin",
+					size: zip.byteLength,
+				},
+				eventTime: "2026-01-01T00:00:02Z",
+			},
+			env,
+		);
+
+		const updated = JSON.parse(
+			(await env.OAUTH_KV.get(sessionKvKey("u1")))!,
+		) as ArchiveUploadSession;
+		expect(updated.status).toBe("committed");
+		expect(updated.commit_sha).toBe("commit1");
+
+		const blobPosts = fetchMock.mock.calls.filter(([input, init]) => {
+			const url = String(input);
+			const method = ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
+			return url.endsWith("/git/blobs") && method === "POST";
+		});
+		expect(blobPosts).toHaveLength(1);
+
+		const treePost = fetchMock.mock.calls.find(([input, init]) => {
+			const url = String(input);
+			const method = ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
+			return url.endsWith("/git/trees") && method === "POST";
+		});
+		const treeBody = JSON.parse(String((treePost![1] as RequestInit).body)) as {
+			tree: Array<{ path: string; content?: string; sha?: string }>;
+		};
+		const byPath = Object.fromEntries(treeBody.tree.map((e) => [e.path, e]));
+		expect(byPath["readme.md"]).toEqual(
+			expect.objectContaining({ path: "readme.md", content: "# hi" }),
+		);
+		expect(byPath["data.bin"]).toEqual(
+			expect.objectContaining({ path: "data.bin", sha: "blob-bin" }),
+		);
+		expect(byPath["data.bin"]?.content).toBeUndefined();
 	});
 });
+
+
+describe("commit rate-limit helpers", () => {
+	it("detects UTF-8 text vs binary", () => {
+		expect(isUtf8Text(new TextEncoder().encode("hello"))).toBe(true);
+		expect(isUtf8Text(new Uint8Array([0, 1, 2]))).toBe(false);
+		expect(isUtf8Text(new Uint8Array([0xff, 0xfe, 0xfd]))).toBe(false);
+	});
+
+	it("inlines UTF-8 files and routes binary to blob creation", () => {
+		const files: ExtractedFile[] = [
+			{ path: "a.txt", content: new TextEncoder().encode("a"), mode: "100644" },
+			{ path: "b.bin", content: new Uint8Array([0, 255]), mode: "100644" },
+		];
+		const { inline, needBlob } = partitionFilesForTree(files);
+		expect(inline.map((f) => f.path)).toEqual(["a.txt"]);
+		expect(needBlob.map((f) => f.path)).toEqual(["b.bin"]);
+	});
+
+	it("treats GitHub secondary rate limit responses as transient/retryable", () => {
+		const body =
+			'{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}';
+		expect(isRetryableGitHubStatus(403, body)).toBe(true);
+		expect(isRetryableGitHubStatus(403, '{"message":"Resource not accessible"}')).toBe(
+			false,
+		);
+		expect(isRetryableGitHubStatus(429, "{}")).toBe(true);
+		expect(
+			isTransientError(
+				`create blob for 'x' failed: 403 ${body}`,
+			),
+		).toBe(true);
+		expect(isTransientError("create blob for 'x' failed: 403 nope")).toBe(false);
+	});
+});
+
 
 function jsonRes(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
