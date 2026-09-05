@@ -7,6 +7,7 @@ import {
 	SESSION_TTL_PADDING_SECONDS,
 	archiveObjectKey,
 	buildStatusPayload,
+	formatArchiveUploadLimits,
 	sessionKvKey,
 } from "./archive-upload-session";
 
@@ -21,7 +22,8 @@ export const CREATE_ARCHIVE_UPLOAD_TOOL = {
 		"not call a separate commit tool. Each upload_id is one-shot — a later PUT to the same " +
 		"URL may succeed at storage level but will NOT be reflected to GitHub; status will show " +
 		"`ignored_duplicate_uploads` and `reflected` stays based on the first successful commit. " +
-		"To push again, create a new upload session. Currently only `zip` is supported.",
+		"To push again, create a new upload session. Currently only `zip` is supported. " +
+		`Size limits (enforced on expand/commit; larger PUTs may store but will fail processing): ${formatArchiveUploadLimits()}.`,
 	inputSchema: {
 		type: "object",
 		properties: {
@@ -180,6 +182,8 @@ export async function handleCreateArchiveUpload(
 					`expires_at: ${expiresAt.toISOString()}\n` +
 					`upload_url: ${uploadUrl}\n` +
 					`status_url: ${statusUrl}\n\n` +
+					`Limits: ${formatArchiveUploadLimits()}.\n` +
+					`Oversized archives may upload to storage but will fail processing.\n\n` +
 					`Upload with:\n` +
 					`  curl -X PUT "$upload_url" --data-binary @archive.zip\n\n` +
 					`Then poll status:\n` +

@@ -10,6 +10,7 @@ import {
 } from "./archive-upload";
 import {
 	buildStatusPayload,
+	formatArchiveUploadLimits,
 	sessionKvKey,
 	uploadIdFromObjectKey,
 	type ArchiveUploadSession,
@@ -25,6 +26,16 @@ describe("tool schemas", () => {
 			"branch",
 			"message",
 		]);
+	});
+
+	it("documents archive size limits in create_archive_upload description", () => {
+		const limits = formatArchiveUploadLimits();
+		expect(limits).toContain("50 MiB");
+		expect(limits).toContain("100 MiB");
+		expect(limits).toContain("1000 files");
+		expect(limits).toContain("10 MiB");
+		expect(CREATE_ARCHIVE_UPLOAD_TOOL.description).toContain(limits);
+		expect(CREATE_ARCHIVE_UPLOAD_TOOL.description).toMatch(/Size limits/i);
 	});
 
 	it("declares get_archive_upload_status fields", () => {
