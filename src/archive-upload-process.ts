@@ -272,17 +272,83 @@ function pushCapped(list: string[], item: string, max: number): string[] {
 	return next;
 }
 
-function isTransientError(msg: string): boolean {
-	return /(?:^|\D)(429|502|503|504)(?:\D|$)|network|fetch failed|lock busy/i.test(
-		msg,
+/**
+ * Transient / retryable failures for the queue consumer.
+ * GitHub secondary rate limits often return HTTP 403 (not 429) with a
+ * "secondary rate limit" message — treat those as transient too.
+ */
+export function isTransientError(msg: string): boolean {
+	return (
+		/(?:^|\D)(429|502|503|504)(?:\D|$)|network|fetch failed|lock busy/i.test(
+			msg,
+		) || /secondary rate limit|exceeded a secondary rate|rate limit/i.test(msg)
 	);
 }
 
-interface TreeEntry {
-	path: string;
-	mode: "100644" | "100755";
-	type: "blob";
-	sha: string;
+/** Max bytes of file content embedded via Create Tree `content` (keeps POST body bounded). */
+export const MAX_INLINE_TREE_CONTENT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Min gap between Git blob POSTs. POST ≈ 5 secondary-rate points; 900 points/min
+ * ⇒ ≤180 POSTs/min. 350ms keeps us under that ceiling even with retries.
+ */
+export const BLOB_POST_MIN_INTERVAL_MS = 350;
+
+const GITHUB_MUTATION_MAX_ATTEMPTS = 6;
+
+type TreeEntry =
+	| {
+			path: string;
+			mode: "100644" | "100755";
+			type: "blob";
+			sha: string;
+	  }
+	| {
+			path: string;
+			mode: "100644" | "100755";
+			type: "blob";
+			content: string;
+	  };
+
+/** True when bytes are valid UTF-8 text with no NUL (safe for GitHub tree `content`). */
+export function isUtf8Text(bytes: Uint8Array): boolean {
+	if (bytes.length === 0) return true;
+	for (let i = 0; i < bytes.length; i++) {
+		if (bytes[i] === 0) return false;
+	}
+	try {
+		new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Prefer Create Tree `content` (1 POST for many files) over per-file Create Blob.
+ * Binary / overflow files still use Create Blob, but throttled + retried so we
+ * stay under GitHub's secondary rate limit (~900 points/min on a single endpoint).
+ */
+export function partitionFilesForTree(files: ExtractedFile[]): {
+	inline: ExtractedFile[];
+	needBlob: ExtractedFile[];
+} {
+	const inline: ExtractedFile[] = [];
+	const needBlob: ExtractedFile[] = [];
+	let inlineBytes = 0;
+
+	for (const file of files) {
+		const canInline =
+			isUtf8Text(file.content) &&
+			inlineBytes + file.content.byteLength <= MAX_INLINE_TREE_CONTENT_BYTES;
+		if (canInline) {
+			inline.push(file);
+			inlineBytes += file.content.byteLength;
+		} else {
+			needBlob.push(file);
+		}
+	}
+	return { inline, needBlob };
 }
 
 async function commitFilesToGitHub(
@@ -301,49 +367,41 @@ async function commitFilesToGitHub(
 			},
 		});
 
+	const { inline, needBlob } = partitionFilesForTree(files);
 	const treeEntries: TreeEntry[] = [];
-	// Create blobs with limited concurrency.
-	const concurrency = 6;
-	for (let i = 0; i < files.length; i += concurrency) {
-		const chunk = files.slice(i, i + concurrency);
-		const shas = await Promise.all(
-			chunk.map(async (file) => {
-				const blobRes = await api(`/repos/${owner}/${repo}/git/blobs`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({
-						content: bytesToBase64(file.content),
-						encoding: "base64",
-					}),
-				});
-				if (!blobRes.ok) {
-					throw new Error(
-						`create blob for '${file.path}' failed: ${blobRes.status} ${await blobRes.text()}`,
-					);
-				}
-				const data = (await blobRes.json()) as { sha: string };
-				return data.sha;
-			}),
-		);
-		for (let j = 0; j < chunk.length; j++) {
+
+	if (needBlob.length > 0) {
+		const shas = await createBlobsThrottled(api, owner, repo, needBlob);
+		for (let i = 0; i < needBlob.length; i++) {
 			treeEntries.push({
-				path: chunk[j].path,
-				mode: chunk[j].mode,
+				path: needBlob[i].path,
+				mode: needBlob[i].mode,
 				type: "blob",
-				sha: shas[j],
+				sha: shas[i],
 			});
 		}
 	}
 
-	// Full tree replace (no base_tree): archive contents become the branch snapshot.
-	const treeRes = await api(`/repos/${owner}/${repo}/git/trees`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ tree: treeEntries }),
-	});
-	if (!treeRes.ok) {
-		throw new Error(`create tree failed: ${treeRes.status} ${await treeRes.text()}`);
+	const decoder = new TextDecoder("utf-8");
+	for (const file of inline) {
+		treeEntries.push({
+			path: file.path,
+			mode: file.mode,
+			type: "blob",
+			content: decoder.decode(file.content),
+		});
 	}
+
+	// Full tree replace (no base_tree): archive contents become the branch snapshot.
+	const treeRes = await githubFetchWithRetry(
+		() =>
+			api(`/repos/${owner}/${repo}/git/trees`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ tree: treeEntries }),
+			}),
+		"create tree",
+	);
 	const treeData = (await treeRes.json()) as { sha: string };
 
 	const refRes = await api(
@@ -360,53 +418,146 @@ async function commitFilesToGitHub(
 		);
 	}
 
-	const commitRes = await api(`/repos/${owner}/${repo}/git/commits`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			message,
-			tree: treeData.sha,
-			parents,
-		}),
-	});
-	if (!commitRes.ok) {
-		throw new Error(
-			`create commit failed: ${commitRes.status} ${await commitRes.text()}`,
-		);
-	}
+	const commitRes = await githubFetchWithRetry(
+		() =>
+			api(`/repos/${owner}/${repo}/git/commits`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					message,
+					tree: treeData.sha,
+					parents,
+				}),
+			}),
+		"create commit",
+	);
 	const commitData = (await commitRes.json()) as { sha: string };
 
 	if (parents.length === 0) {
-		const createRef = await api(`/repos/${owner}/${repo}/git/refs`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				ref: `refs/heads/${branch}`,
-				sha: commitData.sha,
-			}),
-		});
-		if (!createRef.ok) {
-			throw new Error(
-				`create ref failed: ${createRef.status} ${await createRef.text()}`,
-			);
-		}
-	} else {
-		const updateRef = await api(
-			`/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`,
-			{
-				method: "PATCH",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ sha: commitData.sha, force: false }),
-			},
+		const createRef = await githubFetchWithRetry(
+			() =>
+				api(`/repos/${owner}/${repo}/git/refs`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						ref: `refs/heads/${branch}`,
+						sha: commitData.sha,
+					}),
+				}),
+			"create ref",
 		);
-		if (!updateRef.ok) {
-			throw new Error(
-				`update ref failed: ${updateRef.status} ${await updateRef.text()}`,
-			);
-		}
+		await createRef.arrayBuffer(); // drain body
+	} else {
+		const updateRef = await githubFetchWithRetry(
+			() =>
+				api(
+					`/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`,
+					{
+						method: "PATCH",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ sha: commitData.sha, force: false }),
+					},
+				),
+			"update ref",
+		);
+		await updateRef.arrayBuffer();
 	}
 
 	return commitData.sha;
+}
+
+type GitHubApi = (path: string, init?: RequestInit) => Promise<Response>;
+
+async function createBlobsThrottled(
+	api: GitHubApi,
+	owner: string,
+	repo: string,
+	files: ExtractedFile[],
+): Promise<string[]> {
+	const shas: string[] = [];
+	let lastPostAt = 0;
+
+	for (const file of files) {
+		const wait = BLOB_POST_MIN_INTERVAL_MS - (Date.now() - lastPostAt);
+		if (wait > 0) await sleep(wait);
+
+		const res = await githubFetchWithRetry(async () => {
+			lastPostAt = Date.now();
+			return api(`/repos/${owner}/${repo}/git/blobs`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					content: bytesToBase64(file.content),
+					encoding: "base64",
+				}),
+			});
+		}, `create blob for '${file.path}'`);
+
+		const data = (await res.json()) as { sha: string };
+		shas.push(data.sha);
+	}
+	return shas;
+}
+
+async function githubFetchWithRetry(
+	doFetch: () => Promise<Response>,
+	label: string,
+): Promise<Response> {
+	let lastErr = "";
+	for (let attempt = 1; attempt <= GITHUB_MUTATION_MAX_ATTEMPTS; attempt++) {
+		const res = await doFetch();
+		if (res.ok) return res;
+
+		const body = await res.text();
+		lastErr = `${label} failed: ${res.status} ${body}`;
+		if (
+			!isRetryableGitHubStatus(res.status, body) ||
+			attempt === GITHUB_MUTATION_MAX_ATTEMPTS
+		) {
+			throw new Error(lastErr);
+		}
+		await sleep(retryDelayMs(res, attempt));
+	}
+	throw new Error(lastErr || `${label} failed`);
+}
+
+export function isRetryableGitHubStatus(status: number, body: string): boolean {
+	if (status === 429 || status === 502 || status === 503 || status === 504) {
+		return true;
+	}
+	// Secondary rate limits commonly surface as 403 with this wording.
+	if (status === 403 && /rate limit|secondary rate/i.test(body)) {
+		return true;
+	}
+	return false;
+}
+
+function retryDelayMs(res: Response, attempt: number): number {
+	const retryAfter = res.headers.get("retry-after");
+	if (retryAfter) {
+		const asInt = Number(retryAfter);
+		if (Number.isFinite(asInt) && asInt >= 0) {
+			return Math.min(asInt * 1000, 60_000);
+		}
+		const asDate = Date.parse(retryAfter);
+		if (Number.isFinite(asDate)) {
+			return Math.min(Math.max(0, asDate - Date.now()), 60_000);
+		}
+	}
+	const reset = res.headers.get("x-ratelimit-reset");
+	if (reset) {
+		const resetMs = Number(reset) * 1000;
+		if (Number.isFinite(resetMs)) {
+			const until = resetMs - Date.now();
+			if (until > 0 && until < 60_000) return until;
+		}
+	}
+	// Exponential backoff: 1s, 2s, 4s, … capped.
+	return Math.min(1000 * 2 ** (attempt - 1), 30_000);
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
