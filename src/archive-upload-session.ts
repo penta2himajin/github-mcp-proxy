@@ -15,6 +15,22 @@ export const MAX_EXTRACTED_BYTES = 100 * 1024 * 1024;
 export const MAX_FILE_COUNT = 1000;
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
+/** Human-readable summary of limits for tool docs / client guidance. */
+export function formatArchiveUploadLimits(): string {
+	return (
+		`zip ≤ ${formatMiB(MAX_ARCHIVE_BYTES)}, ` +
+		`extracted total ≤ ${formatMiB(MAX_EXTRACTED_BYTES)}, ` +
+		`≤ ${MAX_FILE_COUNT} files, ` +
+		`each file ≤ ${formatMiB(MAX_FILE_BYTES)}`
+	);
+}
+
+function formatMiB(bytes: number): string {
+	const mib = bytes / (1024 * 1024);
+	const text = Number.isInteger(mib) ? String(mib) : mib.toFixed(1);
+	return `${text} MiB`;
+}
+
 export type ArchiveUploadStatus =
 	| "awaiting_upload"
 	| "processing"

@@ -83,7 +83,8 @@ few tools of its own:
   `owner`, `repo`, `branch`, `message`, optional `format` (`zip` only for now).
   Upload with `curl -X PUT "$upload_url" --data-binary @archive.zip`. Each
   `upload_id` is one-shot: a later PUT may still return HTTP 200 from R2, but
-  will **not** be reflected to GitHub.
+  will **not** be reflected to GitHub. Soft limits (enforced on expand/commit):
+  zip ≤ 50 MiB, extracted total ≤ 100 MiB, ≤ 1000 files, each file ≤ 10 MiB.
 - **`get_archive_upload_status`** — poll session status (`reflected`,
   `commit_sha`, `ignored_duplicate_uploads`). R2's PUT response cannot signal
   non-reflection; this tool (or `GET /archive-uploads/:upload_id`) is the
